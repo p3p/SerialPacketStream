@@ -66,6 +66,15 @@ class FileInfoPacket(ServicePacket):
     size : Codec.uint32_t
     filename : Codec.cstring
 
+class FileActionPacket(ServicePacket):
+    Action = IntEnum ('Action',
+        [], start = 0)
+    action : Codec.uint8_t
+    filename : Codec.cstring
+
+class FileDataPacket(RawDataPacket):
+    packet_id = PacketCode.WRITE
+
 
 class FileService(Service):
     def __init__(self):
@@ -73,6 +82,7 @@ class FileService(Service):
         self.register_packet(QueryPacket)
         self.register_packet(ActionResponsePacket)
         self.register_packet(FileInfoPacket)
+        self.register_packet(FileDataPacket)
 
     def query_remote(self):
         self.send_packet(QueryPacket(version_major = 0, version_minor = 1, version_patch = 0,
@@ -94,21 +104,19 @@ class FileService(Service):
         self.send_packet(ServicePacket(packet_id = PacketCode.CLOSE))
         response = self.wait_packet(ActionResponsePacket)
         if response.code == ActionResponsePacket.Code.SUCCESS:
-            logger.info("file closed successfully")
+            return True
         else:
-            logger.error('close barfed')
+            logger.warn("FileService.close return error code {}".format(response.code))
+            return False
 
-    def ls(self):
-        self.send_packet(ServicePacket(packet_id = PacketCode.LIST))
-        listing = []
-        response = self.wait_packet(FileInfoPacket)
-        listing.append(response)
-        while True: # todo: timeout
-            response = self.wait_packet(FileInfoPacket)
-            if response.meta == FileInfoPacket.Meta.EOL:
-                break
-            listing.append(response)
-        return listing
+    def abort(self):
+        self.send_packet(ServicePacket(packet_id = PacketCode.ABORT))
+        response = self.wait_packet(ActionResponsePacket)
+        if response.code == ActionResponsePacket.Code.SUCCESS:
+            return True
+        else:
+            logger.warn("FileService.abort return error code {}".format(response.code))
+            return False
 
     def write(self, buffer, progress = None):
         if progress is not None:
@@ -118,9 +126,68 @@ class FileService(Service):
         for x in (buffer[i:i + self.max_block_size()] for i in range(0, len(buffer), self.max_block_size())):
             # make sure the last packet needed for this buffer is sent as a DATA packet not DATA_NACK
             packet_type = FramePacket.Type.DATA_NACK if len(x) == self.max_block_size() and len(self.tx_queue) < 64 else FramePacket.Type.DATA
-            self.send_packet(RawDataPacket(packet_id = PacketCode.WRITE, data = x), packet_type = packet_type, block = True)
+            self.send_packet(RawDataPacket(packet_id = PacketCode.WRITE, data = x), packet_type = packet_type, block = True) # todo: timeout and error
 
             byte_count += len(x)
             if progress is not None and packet_type == FramePacket.Type.DATA:
                 #only update progress after a packet was confirmed delivered (only DATA types can be blocked until acked)
                 progress.send(byte_count)
+
+        return byte_count
+
+    def ls(self):
+        listing = []
+        self.send_packet(ServicePacket(packet_id = PacketCode.LIST))
+        response = self.wait_packet(FileInfoPacket) # todo: timeout
+        while response.meta != FileInfoPacket.Meta.EOL:
+            listing.append(response)
+            response = self.wait_packet(FileInfoPacket) # todo: timeout
+        return listing
+
+    def cd(self, filename):
+        self.send_packet(FileActionPacket(packet_id = PacketCode.CD, filename = filename))
+        response = self.wait_packet(ActionResponsePacket) # todo: timeout
+        if response.code != ActionResponsePacket.Code.SUCCESS:
+            return True
+        return False
+
+    def pwd(self):
+        self.send_packet(ServicePacket(packet_id = PacketCode.PWD))
+        response = self.wait_packet(FileInfoPacket) # todo: timeout
+        return response.filename
+
+    def put(self, src, dst=None, compression=False, dummy=False, progress=None):
+        if dst is None:
+            dst = src
+
+        self.open(dst, compression=compression, dummy=dummy)
+        with open(src, "rb") as f:  #todo: lazy loading using generator
+            self.write(f.read(), progress=progress)
+        self.close()
+
+    # implement read api, this uses temporary request api
+    # todo: loads of error checking and timeouts
+    def get(self, src, dst=None, compression=False, dummy=False, progress=None):
+        if progress is not None:
+            next(progress)
+
+        if dst is None:
+            dst = src
+
+        bytes_read = 0
+
+        self.send_packet(FileOpenPacket(packet_id = PacketCode.REQUEST, filename=src, compression=compression, dummy=dummy))
+        response = self.wait_packet(ActionResponsePacket)
+        if response.code == ActionResponsePacket.Code.SUCCESS:
+            with open(dst, 'wb') as f:
+                packet = self.wait_packet(FileDataPacket)
+                while len(packet.data) == 64: #todo: 64 is the clients max packet payload size, needs added to transport layer query? ..
+                    f.write(packet.data)
+                    bytes_read += len(packet.data)
+                    if progress is not None:
+                        progress.send(bytes_read)
+                    packet = self.wait_packet(FileDataPacket)
+                bytes_read += len(packet.data)
+                if progress is not None:
+                    progress.send(bytes_read)
+                f.write(packet.data)

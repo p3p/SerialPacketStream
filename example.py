@@ -10,6 +10,7 @@ from collections import deque
 from statistics import median
 
 import time
+import filecmp
 
 import SerialPacketStream
 import SerialPacketStream.FileService
@@ -53,7 +54,6 @@ if __name__ == "__main__":
 
     transport_layer.attach(1, file_service)
     file_service.query_remote()
-    file_service.open('test.g', dummy=False)
 
     def progress_callback(filesize):
         results = deque()
@@ -75,16 +75,28 @@ if __name__ == "__main__":
             last_time = time.perf_counter()
             last_bytes = byte_count
 
-    with open('testbig.g', 'br') as f:
-        file_service.write(f.read(), progress_callback(os.path.getsize(f.name)))
+    file_service.put("testbig.g", progress=progress_callback(os.path.getsize("testbig.g")))
+    file_service.get("testbig.g", "test2.g", progress=progress_callback(os.path.getsize("testbig.g")))
+    logger.info("files identical?: {}".format(filecmp.cmp("testbig.g", "test2.g", shallow=False)))
 
-    file_service.close()
+    file_service.cd("/")
 
     for x in file_service.ls():
         if x.meta == x.Meta.FOLDER:
             print('*{}'.format(x.filename))
         else:
             print('{} {}'.format(x.filename, x.size))
+
+    file_service.cd("TRASH-~1")
+
+    print("Current dir: ", file_service.pwd())
+
+    for x in file_service.ls():
+        if x.meta == x.Meta.FOLDER:
+            print('*{}'.format(x.filename))
+        else:
+            print('{} {}'.format(x.filename, x.size))
+
 
     time.sleep(1)
 

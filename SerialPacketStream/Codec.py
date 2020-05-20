@@ -95,7 +95,7 @@ class bytearray_t(codec_type):
 
     @classmethod
     def decode(cls, buffer):
-        return bytearray(buffer)
+        return bytearray(buffer.memory)
 
 class crc8_t(codec_type):
     datatype = int
