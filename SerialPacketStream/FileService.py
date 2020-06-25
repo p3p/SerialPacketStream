@@ -157,16 +157,16 @@ class FileService(Service):
 
     def ls(self):
         listing = []
-        with ServicePacketListener(self, FileInfoPacket) as packet_queue:
+        with self.listen_for(FileInfoPacket) as packet_queue:
             self.send_packet(ServicePacket(packet_id = PacketCode.LIST))
             while(True): #todo timeout
-                if len(packet_queue):
-                    packet = packet_queue.popleft()
+                if packet_queue.ready():
+                    packet = packet_queue.next()
                     if packet.meta != FileInfoPacket.Meta.EOL:
                         listing.append(packet)
                     else:
                         break
-                time.sleep(0.000001)
+                self.idle()
 
         return listing
 

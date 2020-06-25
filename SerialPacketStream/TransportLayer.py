@@ -24,18 +24,43 @@ class ServicePacket(Codec.Serializable):
             return FramePacket.Status.PENDING
         return self.frame_packet.status
 
+
 class RawDataPacket(ServicePacket):
     data : Codec.bytearray_t
 
+
 class ServicePacketListener(object):
+    class PacketPromise(object):
+        def __init__(self):
+            self.packet_queue = deque()
+
+        def next(self):
+            if self.waiting():
+                return self.packet_queue.popleft()
+            else:
+                return None
+
+        def waiting(self):
+            return len(self.packet_queue)
+
+        def ready(self):
+            return (self.waiting() > 0)
+
+        def queue(self, packet):
+            self.packet_queue.append(packet)
+
+
     def __init__(self, service, packet_cls):
         self.service = service
         self.packet_cls = packet_cls
+
     def __enter__(self):
         return self.service.start_listening(self.packet_cls)
+
     def __exit__(self, type, value, traceback):
         self.service.finish_listening(self.packet_cls)
         return False
+
 
 class Service(object):
     __fullqualname__ = '{}.{}'.format(__module__, __qualname__)
@@ -46,6 +71,9 @@ class Service(object):
         self.listeners = {}
         self.packets = {}
         self._transport_layer = None
+
+    def idle(self, delay = 0.0000001):
+        time.sleep(delay)
 
     def register_packet(self, packet_cls, packet_id = None):
         packet_id = packet_cls.packet_id if packet_id == None else packet_id
@@ -63,36 +91,41 @@ class Service(object):
         self.tx_queue.append((packet_type, packet))
         # todo timeout
         while block and packet_type == FramePacket.Type.DATA and packet.status() != FramePacket.Status.COMPLETE:
-            time.sleep(0.0000001) # this just releases the thread timeslice
+            self.idle()
 
         return packet
 
+    def dispatch(self, packet):
+        if type(packet) in self.listeners:
+            self.listeners[type(packet)].queue(packet) #todo: should this be a queue of listeners per type?
+        else:
+            self.rx_queue.append(packet)
+            #logger.info("Dropped packet of type {}".format(type(packet)))
+
     def start_listening(self, packet_cls):
-        deq = deque()
+        deq = ServicePacketListener.PacketPromise()
         self.listeners[packet_cls] = deq
         return deq
 
     def finish_listening(self, packet_cls):
         del self.listeners[packet_cls]
 
-    def dispatch(self, packet):
-        if type(packet) in self.listeners:
-            self.listeners[type(packet)].append(packet)
-        else:
-            self.rx_queue.append(packet)
+    def listen_for(self, packet_cls):
+        if not issubclass(packet_cls, ServicePacket):
+            raise TypeError("Expected subclass: {}".format(ServicePacket))
+        return ServicePacketListener(self, packet_cls)
 
     def wait_packet(self, packet_cls):
         if not issubclass(packet_cls, ServicePacket):
             raise TypeError("Expected subclass: {}".format(ServicePacket))
 
-        while True: # todo: timeout
-            while len(self.rx_queue):
-                p = self.rx_queue.popleft()
-                if type(p) is packet_cls:
-                    return p
-            time.sleep(0.0001) # allow time for packets to arraive
+        with self.listen_for(packet_cls) as packet_queue:
+            while True:  # todo: timeout
+                if packet_queue.ready():
+                    return packet_queue.next()
+                self.idle(0.0001) # allow time for packets to arraive
 
-        return None
+        return False
 
     def max_block_size(self):
         return self._transport_layer.sync_max_block_size
@@ -122,11 +155,11 @@ class TransportLayerControl(Service):
     def synchronise(self):
         # Packets cant be sent by Services until synchronised so work around this
         # by going directly through the transport layer
+        self._transport_layer.reset_connection()
         logger.info("Switching Marlin to Binary Protocol...")
         self._transport_layer.stream_write(b"\nM28B1\n")
         logger.info("Atempting binary stream synchronisation...")
-        packet = SyncPacket(*self._transport_layer.VERSION, 512, 512)
-        packet.frame_packet = self._transport_layer.send_packet(FramePacket.Type.DATA_FAF, 0, packet.packet_id, bytes(packet))
+        self._transport_layer.send_packet(FramePacket.Type.DATA_FAF, 0, SyncPacket.packet_id, bytes(SyncPacket(*self._transport_layer.VERSION, 512, 512)))
 
     def disconnect(self):
         self.send_packet(ClosePacket(), block = True)
@@ -296,7 +329,7 @@ class TransportLayer(object):
             state_PACKET_WAIT()
 
         def state_PACKET_WAIT():
-            if not self.connection.in_waiting > 0:
+            if self.connection.in_waiting == 0:
                 return
             # look for the packet frame start
             self.stream_read(self.rx_stream.data, 1)
@@ -473,6 +506,10 @@ class TransportLayer(object):
 
     def send_response(self, response_id, packet_sync):
         self.tx_queue.append(FramePacket.Response(response=response_id, sync_id=packet_sync))
+
+    def reset_connection(self):
+        self.rx_stream.reset_connection()
+        self.tx_stream.reset_connection()
 
     def connect(self):
         self.control.synchronise()
