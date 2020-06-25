@@ -8,6 +8,7 @@ import logging
 import math
 from collections import deque
 from statistics import median
+from operator import attrgetter
 
 import time
 import filecmp
@@ -75,28 +76,36 @@ if __name__ == "__main__":
             last_time = time.perf_counter()
             last_bytes = byte_count
 
-    file_service.put("testbig.g", progress=progress_callback(os.path.getsize("testbig.g")))
-    file_service.get("testbig.g", "test2.g", progress=progress_callback(os.path.getsize("testbig.g")))
-    logger.info("files identical?: {}".format(filecmp.cmp("testbig.g", "test2.g", shallow=False)))
+    def ls(path, abs_dir = '', dirs = [], recursive = False):
+        if path != '':
+            file_service.cd(path)
 
-    file_service.cd("/")
+        abs_dir = "{}{}{}".format(abs_dir, '/' if abs_dir != '/' and abs_dir != '' else '' , path)
+        dirs.append(abs_dir)
 
-    for x in file_service.ls():
-        if x.meta == x.Meta.FOLDER:
-            print('*{}'.format(x.filename))
-        else:
-            print('{} {}'.format(x.filename, x.size))
+        for x in sorted(file_service.ls(), key=attrgetter('meta', 'filename')):
+            print("{}\t{}{}{}".format(x.size if x.meta != x.Meta.FOLDER else '*', abs_dir, '/' if abs_dir != '/' else '' ,x.filename))
+            if x.meta == x.Meta.FOLDER and recursive:
+                ls(x.filename, abs_dir, dirs, recursive=True)
 
-    file_service.cd("TRASH-~1")
+        dirs.pop()
 
-    print("Current dir: ", file_service.pwd())
+        if len(dirs) > 0:
+            abs_dir = dirs[-1]
+            if abs_dir != '':
+                file_service.cd(abs_dir)
 
-    for x in file_service.ls():
-        if x.meta == x.Meta.FOLDER:
-            print('*{}'.format(x.filename))
-        else:
-            print('{} {}'.format(x.filename, x.size))
 
+    file_service.mount()
+    #file_service.put("testbig.g", "ZZ.g", progress=progress_callback(os.path.getsize("testbig.g")))
+    #file_service.get("ggjfty.g", "test2.g", progress=progress_callback(os.path.getsize("testbig.g")))
+    #logger.info("files identical?: {}".format(filecmp.cmp("testbig.g", "test2.g", shallow=False)))
+    ls('/', recursive=True)
+
+    #file_service.cd("/TRASH-~1")
+    # print("Current dir: ", file_service.pwd())
+
+    file_service.unmount()
 
     time.sleep(1)
 

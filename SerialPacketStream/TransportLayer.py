@@ -27,12 +27,23 @@ class ServicePacket(Codec.Serializable):
 class RawDataPacket(ServicePacket):
     data : Codec.bytearray_t
 
+class ServicePacketListener(object):
+    def __init__(self, service, packet_cls):
+        self.service = service
+        self.packet_cls = packet_cls
+    def __enter__(self):
+        return self.service.start_listening(self.packet_cls)
+    def __exit__(self, type, value, traceback):
+        self.service.finish_listening(self.packet_cls)
+        return False
+
 class Service(object):
     __fullqualname__ = '{}.{}'.format(__module__, __qualname__)
     def __init__(self):
         type(self).__fullqualname__ = "{}.{}".format(type(self).__module__, type(self).__qualname__)
         self.rx_queue = deque()
         self.tx_queue = deque()
+        self.listeners = {}
         self.packets = {}
         self._transport_layer = None
 
@@ -56,6 +67,20 @@ class Service(object):
 
         return packet
 
+    def start_listening(self, packet_cls):
+        deq = deque()
+        self.listeners[packet_cls] = deq
+        return deq
+
+    def finish_listening(self, packet_cls):
+        del self.listeners[packet_cls]
+
+    def dispatch(self, packet):
+        if type(packet) in self.listeners:
+            self.listeners[type(packet)].append(packet)
+        else:
+            self.rx_queue.append(packet)
+
     def wait_packet(self, packet_cls):
         if not issubclass(packet_cls, ServicePacket):
             raise TypeError("Expected subclass: {}".format(ServicePacket))
@@ -76,10 +101,12 @@ class Service(object):
 class SyncPacket(ServicePacket):
     packet_id = 5
 
-    input_buffer_size : Codec.uint16_t
     version_major : Codec.uint16_t
     version_minor : Codec.uint16_t
     version_patch : Codec.uint16_t
+
+    serial_buffer_size : Codec.uint16_t
+    payload_buffer_size : Codec.uint16_t
 
 
 class ClosePacket(ServicePacket):
@@ -98,7 +125,7 @@ class TransportLayerControl(Service):
         logger.info("Switching Marlin to Binary Protocol...")
         self._transport_layer.stream_write(b"\nM28B1\n")
         logger.info("Atempting binary stream synchronisation...")
-        packet = SyncPacket(512, *self._transport_layer.VERSION)
+        packet = SyncPacket(*self._transport_layer.VERSION, 512, 512)
         packet.frame_packet = self._transport_layer.send_packet(FramePacket.Type.DATA_FAF, 0, packet.packet_id, bytes(packet))
 
     def disconnect(self):
@@ -114,8 +141,8 @@ class TransportLayerControl(Service):
         if len(self.rx_queue):
             packet = self.rx_queue.popleft()
             if isinstance(packet, SyncPacket):
-                self._transport_layer.sync_max_block_size = min(packet.input_buffer_size, self._transport_layer.default_max_block_size)
-                logger.info("Serial TransportLayer Synchronised (Version: {}.{}.{}, {}B payload buffer) ".format(packet.version_major, packet.version_minor, packet.version_patch, packet.input_buffer_size))
+                self._transport_layer.sync_max_block_size = min(packet.payload_buffer_size, self._transport_layer.default_max_block_size)
+                logger.info("Serial TransportLayer Synchronised (Version: {}.{}.{}, {}B serial buffer, {}B payload buffer) ".format(packet.version_major, packet.version_minor, packet.version_patch, packet.serial_buffer_size, packet.payload_buffer_size))
                 self._transport_layer.synchronised = True
                 if packet._frame_packet.header.packet_type == FramePacket.Type.DATA_FAF:
                     logger.info("Remote Sync request accepted")
@@ -415,7 +442,7 @@ class TransportLayer(object):
             packet_class = self.services[packet.header.channel].packets[packet.header.packet_id]
             service_packet = packet_class.from_bytes(packet.data)
             service_packet._frame_packet = packet
-            self.services[packet.header.channel].rx_queue.append(service_packet)
+            self.services[packet.header.channel].dispatch(service_packet)
             self.send_response(FramePacket.Response.Type.ACK, self.rx_stream.sync)
             #service_class = type(self.services[packet.header.channel])
             #logger.debug("Dispatching:\t{0} to [channel: {2}] {1}".format(service_packet, service_class.__fullqualname__, packet.header.channel))

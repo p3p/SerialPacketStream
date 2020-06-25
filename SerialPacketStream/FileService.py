@@ -1,6 +1,8 @@
 from enum import IntEnum
+from collections import deque
+import time
 
-from SerialPacketStream import Service, ServicePacket, RawDataPacket, FramePacket
+from SerialPacketStream import Service, ServicePacket, ServicePacketListener, RawDataPacket, FramePacket
 import SerialPacketStream.Codec as Codec
 
 import logging
@@ -90,6 +92,24 @@ class FileService(Service):
         response = self.wait_packet(QueryPacket)
         logger.info("Remote FileService Version: {}.{}.{}".format(response.version_major, response.version_minor, response.version_patch))
 
+    def mount(self):
+        self.send_packet(ServicePacket(packet_id = PacketCode.MOUNT))
+        response = self.wait_packet(ActionResponsePacket)
+        if response.code == ActionResponsePacket.Code.SUCCESS:
+            return True
+        else:
+            logger.warn("FileService.mount return error code {}".format(response.code))
+            return False
+
+    def unmount(self):
+        self.send_packet(ServicePacket(packet_id = PacketCode.UNMOUNT))
+        response = self.wait_packet(ActionResponsePacket)
+        if response.code == ActionResponsePacket.Code.SUCCESS:
+            return True
+        else:
+            logger.warn("FileService.unmount return error code {}".format(response.code))
+            return False
+
     def open(self, filename, compression = False, dummy = False):
         self.send_packet(FileOpenPacket(filename=filename, compression=compression, dummy=dummy))
         response = self.wait_packet(ActionResponsePacket)
@@ -137,18 +157,25 @@ class FileService(Service):
 
     def ls(self):
         listing = []
-        self.send_packet(ServicePacket(packet_id = PacketCode.LIST))
-        response = self.wait_packet(FileInfoPacket) # todo: timeout
-        while response.meta != FileInfoPacket.Meta.EOL:
-            listing.append(response)
-            response = self.wait_packet(FileInfoPacket) # todo: timeout
+        with ServicePacketListener(self, FileInfoPacket) as packet_queue:
+            self.send_packet(ServicePacket(packet_id = PacketCode.LIST))
+            while(True): #todo timeout
+                if len(packet_queue):
+                    packet = packet_queue.popleft()
+                    if packet.meta != FileInfoPacket.Meta.EOL:
+                        listing.append(packet)
+                    else:
+                        break
+                time.sleep(0.000001)
+
         return listing
 
     def cd(self, filename):
         self.send_packet(FileActionPacket(packet_id = PacketCode.CD, filename = filename))
         response = self.wait_packet(ActionResponsePacket) # todo: timeout
-        if response.code != ActionResponsePacket.Code.SUCCESS:
+        if response.code == ActionResponsePacket.Code.SUCCESS:
             return True
+        logger.warn("FileService.cd({}) return error code {}".format(filename, response.code))
         return False
 
     def pwd(self):
@@ -191,3 +218,5 @@ class FileService(Service):
                 if progress is not None:
                     progress.send(bytes_read)
                 f.write(packet.data)
+        else:
+            logger.warn("Request return error code {}".format(response.code))

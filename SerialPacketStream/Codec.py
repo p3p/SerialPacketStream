@@ -281,7 +281,7 @@ class Serializable(object):
     def __repr__(self):
         return str(self.make_tuple())
 
-    # tofo: typecheck the values being asigned
+    # todo: typecheck the values being asigned
     def __setattr__(self, name, value):
         # if name in self.__annotations__:
         #     feildtype = self.__annotations__.get(name)
